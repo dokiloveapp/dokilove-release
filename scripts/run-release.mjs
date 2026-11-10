@@ -24,8 +24,6 @@ const MAX_DIAGNOSTICS = 64 * 1024 * 1024;
 const SOURCE_CREDENTIALS = [
   "SOURCE_ACCESS_TOKEN",
   "ACCESS_TOKEN",
-  "DE_APP_SSH_KEY",
-  "DE_RUNNER_KNOWN_HOSTS",
 ];
 
 function escapeWorkflowCommandValue(value) {
@@ -146,15 +144,29 @@ async function privateChildEnvironment(request, accessToken, workspace, sourceDi
     workflowFiles[name] = path;
     commandPaths[name] = path;
   }
+  const isolated = {
+    docker: join(workspace, "docker-config"),
+    gh: join(workspace, "gh-config"),
+    xdg: join(workspace, "xdg-config"),
+    cache: join(workspace, "cache"),
+  };
+  await Promise.all(
+    Object.values(isolated).map((path) => mkdir(path, { mode: 0o700 })),
+  );
   const env = {
     PATH: process.env.PATH ?? "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    ...(typeof process.env.HOME === "string" ? { HOME: process.env.HOME } : {}),
     LANG: "C.UTF-8",
     LC_ALL: "C.UTF-8",
     CI: "true",
-    HOME: join(workspace, "home"),
     TMPDIR: join(workspace, "tmp"),
     TEMP: join(workspace, "tmp"),
     RUNNER_TEMP: workspace,
+    DOCKER_CONFIG: isolated.docker,
+    GH_CONFIG_DIR: isolated.gh,
+    XDG_CONFIG_HOME: isolated.xdg,
+    XDG_CACHE_HOME: isolated.cache,
+    COREPACK_HOME: join(isolated.cache, "corepack"),
     GITHUB_WORKSPACE: sourceDirectory,
     GITHUB_REPOSITORY: request.source_repository,
     GITHUB_REPOSITORY_OWNER: request.source_repository.split("/")[0],
@@ -206,7 +218,6 @@ async function privateSourceCheckout(request, accessToken, workspace, logStream,
 
   const checkoutEnvironment = {
     PATH: process.env.PATH ?? "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-    HOME: join(workspace, "home"),
     GIT_CONFIG_GLOBAL: join(workspace, "gitconfig"),
     GIT_CONFIG_SYSTEM: "/dev/null",
     GIT_ASKPASS: askpassFile,
@@ -215,8 +226,6 @@ async function privateSourceCheckout(request, accessToken, workspace, logStream,
     GIT_TRACE_CURL: "0",
     SOURCE_ACCESS_TOKEN: accessToken,
   };
-  await mkdir(checkoutEnvironment.HOME, { recursive: true, mode: 0o700 });
-  const gitDirectory = join(sourceDirectory, ".git");
   for (const args of [
     ["init", "--quiet"],
     ["remote", "add", "origin", "https://github.com/" + request.source_repository + ".git"],
@@ -393,7 +402,7 @@ export async function runHostedRelease({
       cwd: sourceDirectory,
       env: {
         PATH: process.env.PATH ?? "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-        HOME: join(workspace, "home"),
+        ...(typeof process.env.HOME === "string" ? { HOME: process.env.HOME } : {}),
         GIT_CONFIG_GLOBAL: join(workspace, "gitconfig"),
         GIT_CONFIG_SYSTEM: "/dev/null",
         GIT_TERMINAL_PROMPT: "0",

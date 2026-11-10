@@ -36,6 +36,8 @@ async function fixture(directory) {
     "#!/bin/sh",
     "set -eu",
     'printf "private config=%s\\n" "$PRIVATE_BUILD_VALUE"',
+    'printf "deployment key=%s\\n" "$DE_APP_SSH_KEY"',
+    'printf "known host=%s\\n" "$DE_RUNNER_KNOWN_HOSTS"',
     'printf "PRIVATE_VALUE=%s\\n" "$PRIVATE_BUILD_VALUE" >> "$GITHUB_ENV"',
     'printf "PRIVATE_OUTPUT=%s\\n" "$PRIVATE_BUILD_VALUE" >> "$GITHUB_OUTPUT"',
     'printf "# private summary %s\\n" "$PRIVATE_BUILD_VALUE" >> "$GITHUB_STEP_SUMMARY"',
@@ -64,6 +66,8 @@ function makeRequest(overrides = {}) {
     env: {
       ACCESS_TOKEN: privateToken,
       PRIVATE_BUILD_VALUE: privateValue,
+      DE_APP_SSH_KEY: "private-deploy-key-canary",
+      DE_RUNNER_KNOWN_HOSTS: "private-ssh-host-canary",
       PRIVATE_BUILD_FAIL: "0",
     },
     ...overrides,
@@ -149,6 +153,8 @@ test("a private build returns encrypted diagnostics and a result without printin
   assert.ok(!result.publicText.includes(request.source_sha));
   assert.ok(!result.publicText.includes(privateToken));
   assert.ok(!result.publicText.includes(privateValue));
+  assert.ok(!result.publicText.includes("private-deploy-key-canary"));
+  assert.ok(!result.publicText.includes("private-ssh-host-canary"));
   assert.ok(result.maskCommands.some((line) => line.includes(privateToken)));
   assert.ok(result.maskCommands.some((line) => line.includes(request.source_repository)));
 
@@ -156,6 +162,9 @@ test("a private build returns encrypted diagnostics and a result without printin
   assert.ok(!encryptedDiagnostics.includes(privateValue));
   assert.equal(diagnostics.status, "success");
   assert.ok(diagnostics.logs.includes(privateValue));
+  assert.ok(diagnostics.logs.includes("private-deploy-key-canary"));
+  assert.ok(diagnostics.logs.includes("private-ssh-host-canary"));
+  assert.ok(result.maskCommands.some((line) => line.includes("private-deploy-key-canary")));
   assert.equal(diagnostics.source_repository, request.source_repository);
   assert.equal(
     diagnostics.workflow_command_files.GITHUB_ENV.trim(),

@@ -3,6 +3,20 @@ import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 
 export const MAX_ENVELOPE_LENGTH = 65_000;
 export const MAX_REQUEST_BYTES = 48_000;
+const MAX_DIAGNOSTIC_ENVELOPE_LENGTH = 140 * 1024 * 1024;
+const MAX_DIAGNOSTIC_BYTES = 96 * 1024 * 1024;
+const MAX_RESULT_ENVELOPE_LENGTH = 24 * 1024 * 1024;
+const MAX_RESULT_BYTES = 18 * 1024 * 1024;
+const PLAINTEXT_LIMITS = new Map([
+  ["request", MAX_REQUEST_BYTES],
+  ["diagnostics", MAX_DIAGNOSTIC_BYTES],
+  ["result", MAX_RESULT_BYTES],
+]);
+const ENVELOPE_LIMITS = new Map([
+  ["request", MAX_ENVELOPE_LENGTH],
+  ["diagnostics", MAX_DIAGNOSTIC_ENVELOPE_LENGTH],
+  ["result", MAX_RESULT_ENVELOPE_LENGTH],
+]);
 
 const PURPOSES = new Set(["request", "diagnostics", "result"]);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -43,13 +57,14 @@ export function decodeKey(encoded) {
 export function sealEnvelope(value, key, purpose) {
   validateKey(key);
   const associatedData = aad(purpose);
+  const plaintextLimit = PLAINTEXT_LIMITS.get(purpose);
   let cleartext;
   try {
     cleartext = Buffer.from(JSON.stringify(value), "utf8");
   } catch {
     invalid();
   }
-  if (cleartext.length > MAX_REQUEST_BYTES) invalid();
+  if (cleartext.length > plaintextLimit) invalid();
 
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", key, iv);
@@ -62,13 +77,17 @@ export function sealEnvelope(value, key, purpose) {
     data: data.toString("base64url"),
   };
   const encoded = Buffer.from(JSON.stringify(envelope), "utf8").toString("base64url");
-  if (encoded.length > MAX_ENVELOPE_LENGTH) invalid();
+  if (encoded.length > ENVELOPE_LIMITS.get(purpose)) invalid();
   return encoded;
 }
 
 export function openEnvelope(encoded, key, purpose) {
   validateKey(key);
-  if (typeof encoded !== "string" || encoded.length === 0 || encoded.length > MAX_ENVELOPE_LENGTH) invalid();
+  if (
+    typeof encoded !== "string" ||
+    encoded.length === 0 ||
+    encoded.length > ENVELOPE_LIMITS.get(purpose)
+  ) invalid();
   const associatedData = aad(purpose);
   const envelope = JSON.parse(decodeBase64Url(encoded).toString("utf8"));
   if (
@@ -87,7 +106,7 @@ export function openEnvelope(encoded, key, purpose) {
     decipher.setAAD(associatedData);
     decipher.setAuthTag(tag);
     const cleartext = Buffer.concat([decipher.update(data), decipher.final()]);
-    if (cleartext.length > MAX_REQUEST_BYTES) invalid();
+    if (cleartext.length > PLAINTEXT_LIMITS.get(purpose)) invalid();
     return JSON.parse(cleartext.toString("utf8"));
   } catch {
     invalid();

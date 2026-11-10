@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import test from "node:test";
 import {
+  MAX_ENVELOPE_LENGTH,
   decodeKey,
   openEnvelope,
   sealEnvelope,
@@ -43,6 +44,16 @@ test("wrong key, purpose, or tampered ciphertext are rejected", () => {
   envelope.data = ciphertext.toString("base64url");
   const tampered = Buffer.from(JSON.stringify(envelope)).toString("base64url");
   assert.throws(() => openEnvelope(tampered, key, "request"));
+});
+
+test("diagnostic envelopes support captured logs larger than the workflow input limit", () => {
+  const diagnostics = {
+    request_id: "a204da55-7280-4d8c-8f79-605a67d48654",
+    logs: "private diagnostic line\n".repeat(4_500),
+  };
+  const encoded = sealEnvelope(diagnostics, key, "diagnostics");
+  assert.ok(encoded.length > MAX_ENVELOPE_LENGTH);
+  assert.deepEqual(openEnvelope(encoded, key, "diagnostics"), diagnostics);
 });
 
 test("only a canonical base64 encoded 32 byte key is accepted", () => {
