@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import test from "node:test";
 import { openEnvelope, sealEnvelope } from "./bridge.mjs";
-import { runHostedRelease } from "./run-release.mjs";
+import { runCli, runHostedRelease } from "./run-release.mjs";
 
 const key = Buffer.alloc(32, 0x58);
 const sha = "b".repeat(40);
@@ -74,12 +74,21 @@ function makeRequest(overrides = {}) {
   };
 }
 
-async function runFixture({ request, fixturePaths, root }) {
+async function runFixture({ request, fixturePaths, root, blockDiagnostics = false }) {
   const oldPath = process.env.PATH;
   const outputFile = join(root, "github-output.txt");
   const oldOutput = process.env.GITHUB_OUTPUT;
   process.env.PATH = fixturePaths.fakeBin + delimiter + oldPath;
   process.env.GITHUB_OUTPUT = outputFile;
+  if (blockDiagnostics) {
+    const outputDirectory = join(root, "release-output");
+    await mkdir(outputDirectory, { mode: 0o700 });
+    await writeFile(
+      join(outputDirectory, "diagnostics.enc"),
+      "pre-existing sentinel artifact",
+      { encoding: "utf8", mode: 0o600 },
+    );
+  }
   const payload = sealEnvelope(request, key, "request");
   const statuses = [];
   const warnings = [];
@@ -101,15 +110,26 @@ async function runFixture({ request, fixturePaths, root }) {
       bridgeKey: key,
       runnerTemp: root,
       status: (message) => statuses.push(message),
-      failure: () => warnings.push("Release failed; encrypted diagnostics are available."),
+      failure: (artifactReady) =>
+        warnings.push(
+          artifactReady
+            ? "Release failed; encrypted diagnostics are available."
+            : "Release failed before encrypted diagnostics could be saved.",
+        ),
     });
+    let output = "";
+    try {
+      output = await readFile(outputFile, "utf8");
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
     return {
       result,
       statuses,
       warnings,
       maskCommands,
       publicText: publicLines.join(""),
-      output: await readFile(outputFile, "utf8"),
+      output,
     };
   } finally {
     process.stdout.write = originalWrite;
@@ -226,4 +246,43 @@ test("a failed private probe keeps its source path and canary encrypted", async 
   assert.equal(diagnostics.status, "failure");
   assert.ok(diagnostics.logs.includes("private-probe-canary"));
   assert.ok(diagnostics.logs.includes("scripts/ci/hosted-build.sh"));
+});
+
+test("a successful private helper is not marked complete when encrypted output cannot be saved", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "public-runner-output-failure-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const fixturePaths = await fixture(root);
+  const request = makeRequest();
+  const result = await runFixture({
+    request,
+    fixturePaths,
+    root,
+    blockDiagnostics: true,
+  });
+
+  assert.equal(result.result.ok, false);
+  assert.equal(result.result.artifactReady, false);
+  assert.deepEqual(result.statuses, ["Preparing release.", "Building release."]);
+  assert.deepEqual(result.warnings, [
+    "Release failed before encrypted diagnostics could be saved.",
+  ]);
+  assert.equal(result.output, "");
+  assert.ok(!result.publicText.includes("EEXIST"));
+  assert.ok(!result.publicText.includes("pre-existing sentinel artifact"));
+});
+
+test("the CLI catches a rejected encrypted run without exposing the exception", async () => {
+  const publicMessages = [];
+  const exitCode = await runCli({
+    environment: { RELEASE_BRIDGE_KEY: key.toString("base64") },
+    execute: async () => {
+      throw new Error("private exception detail");
+    },
+    failure: (message) => publicMessages.push(message),
+  });
+
+  assert.equal(exitCode, 1);
+  assert.deepEqual(publicMessages, [
+    "Release failed before encrypted diagnostics could be saved.",
+  ]);
 });

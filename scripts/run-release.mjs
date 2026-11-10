@@ -383,6 +383,7 @@ export async function runHostedRelease({
   let privateError = null;
   let resultPath;
   let validatedBuildResult = null;
+  let completionMessage = null;
 
   try {
     status("Preparing release.");
@@ -448,7 +449,8 @@ export async function runHostedRelease({
       validatedBuildResult = result;
     }
     ok = true;
-    status(request.mode === "probe" ? "Release request checked." : "Release complete.");
+    completionMessage =
+      request.mode === "probe" ? "Release request checked." : "Release complete.";
   } catch (error) {
     privateError = error;
   } finally {
@@ -532,7 +534,6 @@ export async function runHostedRelease({
         if (ok) throw new Error("The private build result could not be encrypted.");
       }
     }
-    artifactReady = true;
     const output = process.env.GITHUB_OUTPUT;
     if (output) {
       const handle = await open(output, "a", 0o600);
@@ -542,33 +543,48 @@ export async function runHostedRelease({
         await handle.close();
       }
     }
+    artifactReady = true;
   } catch {
     artifactReady = false;
   }
 
   await rm(workspace, { recursive: true, force: true }).catch(() => {});
+  if (ok && artifactReady && completionMessage) status(completionMessage);
+  if (ok && !artifactReady) ok = false;
   if (!ok) failure(artifactReady);
   return { ok, artifactReady };
+}
+
+export async function runCli({
+  environment = process.env,
+  execute = runHostedRelease,
+  failure = (message) => process.stderr.write(message + "\n"),
+} = {}) {
+  let key;
+  try {
+    key = decodeKey(environment.RELEASE_BRIDGE_KEY);
+  } catch {
+    failure("Release setup failed before private source checkout.");
+    return 1;
+  }
+
+  try {
+    const result = await execute({
+      payload: environment.RELEASE_PAYLOAD ?? "",
+      requestId: environment.RELEASE_REQUEST_ID ?? "",
+      bridgeKey: key,
+      runnerTemp: environment.RUNNER_TEMP ?? tmpdir(),
+    });
+    return result.ok && result.artifactReady ? 0 : 1;
+  } catch {
+    failure("Release failed before encrypted diagnostics could be saved.");
+    return 1;
+  }
 }
 
 if (
   process.argv[1] &&
   resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
-  let key;
-  try {
-    key = decodeKey(process.env.RELEASE_BRIDGE_KEY);
-  } catch {
-    process.stderr.write("Release setup failed before private source checkout.\n");
-    process.exitCode = 1;
-  }
-  if (key) {
-    const result = await runHostedRelease({
-      payload: process.env.RELEASE_PAYLOAD ?? "",
-      requestId: process.env.RELEASE_REQUEST_ID ?? "",
-      bridgeKey: key,
-      runnerTemp: process.env.RUNNER_TEMP ?? tmpdir(),
-    });
-    if (!result.ok) process.exitCode = 1;
-  }
+  process.exitCode = await runCli();
 }
