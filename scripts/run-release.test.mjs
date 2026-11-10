@@ -51,11 +51,21 @@ async function fixture(directory, { annotatedTag = false, tagTarget = sha } = {}
     'printf "%s\\n" "$PRIVATE_BUILD_VALUE" >> "$GITHUB_PATH"',
     'printf "PRIVATE_STATE=%s\\n" "$PRIVATE_BUILD_VALUE" >> "$GITHUB_STATE"',
     'if [ "$PRIVATE_BUILD_FAIL" = "1" ]; then exit 37; fi',
-    "node -e 'require(\"node:fs\").writeFileSync(process.env.HOSTED_RELEASE_RESULT_FILE,JSON.stringify({schema:1,source_sha:process.env.SOURCE_SHA,component:process.env.HOSTED_RELEASE_COMPONENT}))'",
+    "node -e 'require(\"node:fs\").writeFileSync(process.env.HOSTED_RELEASE_RESULT_FILE,JSON.stringify({schema:1,source_sha:process.env.SOURCE_SHA,component:process.env.HOSTED_RELEASE_COMPONENT,request_id:process.env.HOSTED_RELEASE_REQUEST_ID}))'",
     "",
   ].join("\n");
   await writeFile(join(scripts, "hosted-build.sh"), build, { mode: 0o700 });
-  await writeFile(join(scripts, "hosted-deploy.sh"), "#!/bin/sh\nprintf 'private deployment stage\\n'\n", { mode: 0o700 });
+  await writeFile(
+    join(scripts, "hosted-deploy.sh"),
+    [
+      "#!/bin/sh",
+      "set -eu",
+      "node -e 'const result=require(\"node:fs\").readFileSync(process.env.HOSTED_RELEASE_RESULT_FILE,\"utf8\");if(JSON.parse(result).request_id!==process.env.HOSTED_RELEASE_REQUEST_ID)process.exit(49)'",
+      "printf 'private deployment stage\\n'",
+      "",
+    ].join("\n"),
+    { mode: 0o700 },
+  );
   await chmod(join(scripts, "hosted-build.sh"), 0o700);
   await chmod(join(scripts, "hosted-deploy.sh"), 0o700);
   return { root, fakeBin };
@@ -217,6 +227,7 @@ test("a private build returns encrypted diagnostics and a result without printin
     schema: 1,
     source_sha: request.source_sha,
     component: request.component,
+    request_id: resultEnvelope.execution_id,
   });
 });
 
@@ -277,6 +288,11 @@ test("release mode fetches and verifies the exact lightweight component tag befo
     key,
     "diagnostics",
   );
+  const encryptedResult = (
+    await readFile(join(root, "release-output", "result.enc"), "utf8")
+  ).trim();
+  const resultEnvelope = openEnvelope(encryptedResult, key, "result");
+  assert.equal(resultEnvelope.result.request_id, diagnostics.execution_id);
   assert.ok(
     diagnostics.logs.includes(
       "fetched-ref=refs/tags/" + tag + ":refs/tags/" + tag,
@@ -284,6 +300,53 @@ test("release mode fetches and verifies the exact lightweight component tag befo
   );
   assert.ok(diagnostics.logs.includes("private deployment stage"));
 });
+
+test("a retry of one authenticated release request uses a fresh execution ID", async (t) => {
+  const firstRoot = await mkdtemp(join(tmpdir(), "public-runner-retry-one-"));
+  const secondRoot = await mkdtemp(join(tmpdir(), "public-runner-retry-two-"));
+  t.after(async () => {
+    await Promise.all([
+      rm(firstRoot, { recursive: true, force: true }),
+      rm(secondRoot, { recursive: true, force: true }),
+    ]);
+  });
+  const firstFixture = await fixture(firstRoot);
+  const secondFixture = await fixture(secondRoot);
+  const request = makeRequest({ mode: "release", tag: "service-web-v2.3.4" });
+  const first = await runFixture({ request, fixturePaths: firstFixture, root: firstRoot });
+  const second = await runFixture({ request, fixturePaths: secondFixture, root: secondRoot });
+
+  assert.equal(first.result.ok, true);
+  assert.equal(second.result.ok, true);
+  const firstDiagnostics = openEnvelope(
+    (await readFile(join(firstRoot, "release-output", "diagnostics.enc"), "utf8")).trim(),
+    key,
+    "diagnostics",
+  );
+  const secondDiagnostics = openEnvelope(
+    (await readFile(join(secondRoot, "release-output", "diagnostics.enc"), "utf8")).trim(),
+    key,
+    "diagnostics",
+  );
+  const firstResult = openEnvelope(
+    (await readFile(join(firstRoot, "release-output", "result.enc"), "utf8")).trim(),
+    key,
+    "result",
+  );
+  const secondResult = openEnvelope(
+    (await readFile(join(secondRoot, "release-output", "result.enc"), "utf8")).trim(),
+    key,
+    "result",
+  );
+  assert.equal(firstDiagnostics.request_id, request.id);
+  assert.equal(secondDiagnostics.request_id, request.id);
+  assert.notEqual(firstDiagnostics.execution_id, secondDiagnostics.execution_id);
+  assert.equal(firstResult.execution_id, firstDiagnostics.execution_id);
+  assert.equal(secondResult.execution_id, secondDiagnostics.execution_id);
+  assert.equal(firstResult.result.request_id, firstDiagnostics.execution_id);
+  assert.equal(secondResult.result.request_id, secondDiagnostics.execution_id);
+}
+);
 
 for (const rejectedTag of [
   { name: "annotated tag", fixture: { annotatedTag: true, tagTarget: sha } },

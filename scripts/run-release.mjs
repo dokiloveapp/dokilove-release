@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createWriteStream } from "node:fs";
 import {
@@ -38,9 +39,10 @@ function registerMask(value) {
   process.stdout.write("::add-mask::" + escapeWorkflowCommandValue(value) + "\n");
 }
 
-function maskRequest(request, accessToken) {
+function maskRequest(request, accessToken, executionId) {
   for (const value of [
     request.id,
+    executionId,
     request.source_repository,
     request.source_sha,
     request.tag,
@@ -133,7 +135,13 @@ async function runPrivateProcess({
   return { ...result, stdout: stdoutOutput };
 }
 
-async function privateChildEnvironment(request, accessToken, workspace, sourceDirectory) {
+async function privateChildEnvironment(
+  request,
+  executionId,
+  accessToken,
+  workspace,
+  sourceDirectory,
+) {
   const commandDirectory = join(workspace, "workflow-command-files");
   await mkdir(commandDirectory, { mode: 0o700 });
   const workflowFiles = {};
@@ -193,7 +201,7 @@ async function privateChildEnvironment(request, accessToken, workspace, sourceDi
   env.HOSTED_RELEASE_COMPONENT = request.component;
   env.HOSTED_RELEASE_TAG = request.tag;
   env.HOSTED_RELEASE_MODE = request.mode;
-  env.HOSTED_RELEASE_REQUEST_ID = request.id;
+  env.HOSTED_RELEASE_REQUEST_ID = executionId;
   env.HOSTED_RELEASE_RESULT_FILE = join(workspace, "result.json");
   return { env, workflowFiles };
 }
@@ -417,13 +425,12 @@ export async function runHostedRelease({
     fixedRequestFailure();
     return { ok: false, artifactReady: false };
   }
-  maskRequest(request, accessToken);
-
   const runnerRoot = resolve(runnerTemp ?? process.env.RUNNER_TEMP ?? tmpdir());
+  const executionId = randomUUID();
+  maskRequest(request, accessToken, executionId);
   const workspace = await mkdtemp(join(runnerRoot, "private-release-"));
   await chmod(workspace, 0o700);
   await mkdir(join(workspace, "tmp"), { mode: 0o700 });
-  await mkdir(join(workspace, "home"), { mode: 0o700 });
   const logFile = join(workspace, "private-diagnostics.ndjson");
   const logStream = createWriteStream(logFile, { flags: "wx", mode: 0o600 });
   const budget = { remaining: MAX_DIAGNOSTICS, truncated: false };
@@ -472,6 +479,7 @@ export async function runHostedRelease({
 
     const childEnvironment = await privateChildEnvironment(
       request,
+      executionId,
       accessToken,
       workspace,
       sourceDirectory,
@@ -492,7 +500,8 @@ export async function runHostedRelease({
       if (
         result.schema !== 1 ||
         result.source_sha !== request.source_sha ||
-        result.component !== request.component
+        result.component !== request.component ||
+        result.request_id !== executionId
       ) {
         throw new Error("The private release result did not match the request.");
       }
@@ -538,6 +547,7 @@ export async function runHostedRelease({
     const diagnostics = {
       schema: 1,
       request_id: request.id,
+      execution_id: executionId,
       source_repository: request.source_repository,
       source_sha: request.source_sha,
       component: request.component,
@@ -572,6 +582,7 @@ export async function runHostedRelease({
           {
             schema: 1,
             request_id: request.id,
+            execution_id: executionId,
             source_sha: request.source_sha,
             component: request.component,
             status: ok ? "success" : "failure",
