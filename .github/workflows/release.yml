@@ -51,7 +51,7 @@ jobs:
         if: always() && steps.execute.outputs.artifact_ready == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: release-output-${{ inputs.request_id }}
+          name: release-output-${{ inputs.request_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/release-output/*.enc
           if-no-files-found: error
           retention-days: 7
