@@ -1,0 +1,58 @@
+name: Release
+run-name: Release ${{ inputs.request_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      request_id:
+        description: Opaque authenticated request identifier
+        type: string
+        required: true
+      payload:
+        description: Encrypted release request
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-production
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout public automation
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.22.1
+          check-latest: false
+
+      - name: Execute authenticated request
+        id: execute
+        env:
+          RELEASE_BRIDGE_KEY: ${{ secrets.RELEASE_BRIDGE_KEY }}
+          RELEASE_PAYLOAD: ${{ inputs.payload }}
+          RELEASE_REQUEST_ID: ${{ inputs.request_id }}
+        run: node scripts/run-release.mjs
+
+      - name: Upload encrypted diagnostics
+        if: always() && steps.execute.outputs.artifact_ready == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-output-${{ inputs.request_id }}
+          path: ${{ runner.temp }}/release-output/*.enc
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
