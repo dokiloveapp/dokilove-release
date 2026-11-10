@@ -12,7 +12,7 @@ const uuid = "54d9c02c-761e-4415-9974-f0acde3693a3";
 const privateValue = "private-build-config-canary";
 const privateToken = "private-source-token-canary";
 
-async function fixture(directory) {
+async function fixture(directory, { annotatedTag = false, tagTarget = sha } = {}) {
   const root = join(directory, "fixture-source");
   const scripts = join(root, "scripts", "ci");
   const fakeBin = join(directory, "fake-bin");
@@ -22,9 +22,16 @@ async function fixture(directory) {
     "#!/bin/sh",
     "set -eu",
     'if [ "$1" = "-c" ] && [ "$3" = "fetch" ]; then',
+    '  printf "fetched-ref=%s\\n" "$8"',
     "  /bin/cp -R " + JSON.stringify(root + "/.") + ' "$PWD"',
     "  exit 0",
     "fi",
+    'if [ "$1" = "cat-file" ]; then printf "%s\\n" "' +
+      (annotatedTag ? "tag" : "commit") +
+      '"; exit 0; fi',
+    'if [ "$1" = "rev-parse" ] && [ "$3" = "refs/tags/service-web-v2.3.4^{commit}" ]; then printf "%s\\n" "' +
+      tagTarget +
+      '"; exit 0; fi',
     'if [ "$1" = "rev-parse" ]; then printf "%s\\n" "' + sha + '"; exit 0; fi',
     "exit 0",
     "",
@@ -58,9 +65,9 @@ function makeRequest(overrides = {}) {
   return {
     v: 1,
     id: uuid,
-    source_repository: "private-company/application",
+    source_repository: "example-org/example-repository",
     source_sha: sha,
-    component: "dokilove-web",
+    component: "service-web",
     tag: "",
     mode: "build",
     env: {
@@ -247,6 +254,62 @@ test("a failed private probe keeps its source path and canary encrypted", async 
   assert.ok(diagnostics.logs.includes("private-probe-canary"));
   assert.ok(diagnostics.logs.includes("scripts/ci/hosted-build.sh"));
 });
+
+test("release mode fetches and verifies the exact lightweight component tag before building", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "public-runner-tagged-release-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const fixturePaths = await fixture(root);
+  const tag = "service-web-v2.3.4";
+  const request = makeRequest({ mode: "release", tag });
+  const result = await runFixture({ request, fixturePaths, root });
+
+  assert.equal(result.result.ok, true);
+  assert.equal(result.result.artifactReady, true);
+  assert.deepEqual(result.statuses, [
+    "Preparing release.",
+    "Building release.",
+    "Deploying release.",
+    "Release complete.",
+  ]);
+  assert.ok(!result.publicText.includes(tag));
+  const diagnostics = openEnvelope(
+    (await readFile(join(root, "release-output", "diagnostics.enc"), "utf8")).trim(),
+    key,
+    "diagnostics",
+  );
+  assert.ok(
+    diagnostics.logs.includes(
+      "fetched-ref=refs/tags/" + tag + ":refs/tags/" + tag,
+    ),
+  );
+  assert.ok(diagnostics.logs.includes("private deployment stage"));
+});
+
+for (const rejectedTag of [
+  { name: "annotated tag", fixture: { annotatedTag: true, tagTarget: sha } },
+  { name: "tag with another commit", fixture: { annotatedTag: false, tagTarget: "c".repeat(40) } },
+]) {
+  test("release mode rejects an " + rejectedTag.name + " before private helpers", async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "public-runner-invalid-tag-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const fixturePaths = await fixture(root, rejectedTag.fixture);
+    const request = makeRequest({ mode: "release", tag: "service-web-v2.3.4" });
+    const result = await runFixture({ request, fixturePaths, root });
+
+    assert.equal(result.result.ok, false);
+    assert.equal(result.result.artifactReady, true);
+    assert.deepEqual(result.statuses, ["Preparing release."]);
+    assert.equal(result.warnings.length, 1);
+    assert.ok(!result.publicText.includes(request.source_repository));
+    assert.ok(!result.publicText.includes(request.source_sha));
+    const diagnostics = openEnvelope(
+      (await readFile(join(root, "release-output", "diagnostics.enc"), "utf8")).trim(),
+      key,
+      "diagnostics",
+    );
+    assert.ok(!diagnostics.logs.includes("private config="));
+  });
+}
 
 test("a successful private helper is not marked complete when encrypted output cannot be saved", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "public-runner-output-failure-"));

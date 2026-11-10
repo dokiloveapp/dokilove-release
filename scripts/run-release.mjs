@@ -200,6 +200,14 @@ async function privateChildEnvironment(request, accessToken, workspace, sourceDi
 
 async function privateSourceCheckout(request, accessToken, workspace, logStream, budget) {
   const sourceDirectory = join(workspace, "source");
+  const tagRef =
+    request.mode === "release"
+      ? "refs/tags/" + request.tag
+      : null;
+  const fetchRefspec = tagRef
+    ? tagRef + ":" + tagRef
+    : request.source_sha;
+  const checkoutTarget = tagRef ?? "FETCH_HEAD";
   await mkdir(sourceDirectory, { recursive: false, mode: 0o700 });
   const askpassFile = join(workspace, "askpass.sh");
   await writeFile(
@@ -237,9 +245,8 @@ async function privateSourceCheckout(request, accessToken, workspace, logStream,
       "--no-tags",
       "--depth=1",
       "origin",
-      request.source_sha,
+      fetchRefspec,
     ],
-    ["checkout", "--quiet", "--detach", "FETCH_HEAD"],
   ]) {
     const git = await runPrivateProcess({
       command: "git",
@@ -252,6 +259,49 @@ async function privateSourceCheckout(request, accessToken, workspace, logStream,
     if (git.code !== 0 || git.signal !== null) {
       throw new Error("The private source checkout failed.");
     }
+  }
+  if (tagRef) {
+    const tagType = await runPrivateProcess({
+      command: "git",
+      args: ["cat-file", "-t", tagRef],
+      cwd: sourceDirectory,
+      env: checkoutEnvironment,
+      logStream,
+      budget,
+    });
+    if (
+      tagType.code !== 0 ||
+      tagType.signal !== null ||
+      tagType.stdout.trim() !== "commit"
+    ) {
+      throw new Error("The requested release tag is not a lightweight commit tag.");
+    }
+    const taggedCommit = await runPrivateProcess({
+      command: "git",
+      args: ["rev-parse", "--verify", tagRef + "^{commit}"],
+      cwd: sourceDirectory,
+      env: checkoutEnvironment,
+      logStream,
+      budget,
+    });
+    if (
+      taggedCommit.code !== 0 ||
+      taggedCommit.signal !== null ||
+      taggedCommit.stdout.trim() !== request.source_sha
+    ) {
+      throw new Error("The requested release tag does not match its pinned commit.");
+    }
+  }
+  const checkout = await runPrivateProcess({
+    command: "git",
+    args: ["checkout", "--quiet", "--detach", checkoutTarget],
+    cwd: sourceDirectory,
+    env: checkoutEnvironment,
+    logStream,
+    budget,
+  });
+  if (checkout.code !== 0 || checkout.signal !== null) {
+    throw new Error("The private source checkout failed.");
   }
   const head = await runPrivateProcess({
     command: "git",
